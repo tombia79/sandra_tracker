@@ -214,6 +214,8 @@
 <script>
 (() => {
   const STORAGE_KEY = 'sandra-ft-tracker-v5';
+  const REMOTE_URL = '/.netlify/functions/ft-data';
+
   let data = { byDate: {} }; // "YYYY-MM-DD": {made, miss}
   let editingKey = null;
 
@@ -225,54 +227,51 @@
     return tz.toISOString().slice(0,10);
   };
 
-  const REMOTE_URL = '/.netlify/functions/ft-data';
-
-// Local fallback
-function saveLocal(){ localStorage.setItem(STORAGE_KEY, JSON.stringify(data)); }
-function loadLocal(){
-  const raw = localStorage.getItem(STORAGE_KEY);
-  if (raw) { try { data = JSON.parse(raw) || data; } catch(e){} }
-}
-
-// Remote sync
-async function fetchRemote() {
-  try {
-    const r = await fetch(REMOTE_URL, { method: 'GET' });
-    if (!r.ok) throw new Error('fetch failed');
-    return await r.json();
-  } catch {
-    return null; // offline or first run
+  /* ===== Local cache ===== */
+  function saveLocal(){ localStorage.setItem(STORAGE_KEY, JSON.stringify(data)); }
+  function loadLocal(){
+    const raw = localStorage.getItem(STORAGE_KEY);
+    if (raw) { try { data = JSON.parse(raw) || data; } catch(e){} }
   }
-}
 
-async function saveRemote(payload) {
-  try {
-    await fetch(REMOTE_URL, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(payload)
-    });
-  } catch (e) {
-    console.warn('Remote save failed, offline?', e);
+  /* ===== Remote sync ===== */
+  async function fetchRemote() {
+    try {
+      const r = await fetch(REMOTE_URL, { method: 'GET' });
+      if (!r.ok) throw new Error('fetch failed');
+      return await r.json();
+    } catch (e) {
+      console.warn('Remote load failed, offline?', e);
+      return null;
+    }
   }
-}
 
-// Override your old save/load
-async function load() {
-  const remote = await fetchRemote();
-  if (remote && remote.byDate) {
-    data = remote;
-    saveLocal(); // keep local cache
-    return;
+  async function saveRemote(payload) {
+    try {
+      await fetch(REMOTE_URL, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload)
+      });
+    } catch (e) {
+      console.warn('Remote save failed, offline?', e);
+    }
   }
-  loadLocal();
-}
 
-function save() {
-  saveLocal();
-  saveRemote(data);
-}
-
+  // Override original save/load with shared store logic
+  async function load(){
+    const remote = await fetchRemote();
+    if (remote && remote.byDate) {
+      data = remote;
+      saveLocal(); // cache for speed/offline
+    } else {
+      loadLocal();
+    }
+  }
+  function save(){
+    saveLocal();
+    saveRemote(data); // fire-and-forget
+  }
 
   // 3-digit clamp
   function clamp3(el){
@@ -434,9 +433,52 @@ function save() {
     });
   }
 
-  function renderAll(){
-    renderByDate();
-    renderMonthSection();
+  async function init(){
+    await load();        // pull shared data first
+    setForm(todayISO(), '', '');
+    $('monthPicker').value = todayISO().slice(0,7);
+
+    $('attempts').addEventListener('input', e=>clamp3(e.target));
+    $('made').addEventListener('input', e=>clamp3(e.target));
+
+    $('saveBtn').addEventListener('click', upsertEntry);
+    $('resetFormBtn').addEventListener('click', clearForm);
+    $('clearAllBtn').addEventListener('click', ()=>{
+      if(!confirm('Clear ALL data?')) return;
+      data = { byDate:{} }; save(); renderAll(); clearForm();
+    });
+
+    // Tabs
+    document.querySelectorAll('.tab').forEach(t=>{
+      t.addEventListener('click', ()=> switchTab(t.getAttribute('data-tab')));
+    });
+    $('monthPicker').addEventListener('change', renderMonthSection);
+
+    // Menu
+    function closeMenu(){ $('menu').classList.remove('open'); $('menuBtn').setAttribute('aria-expanded','false'); }
+    function toggleMenu(e){
+      e?.stopPropagation?.();
+      const m = $('menu'); const open = !m.classList.contains('open');
+      m.classList.toggle('open', open);
+      $('menuBtn').setAttribute('aria-expanded', String(open));
+    }
+    $('menuBtn').addEventListener('click', toggleMenu);
+    document.addEventListener('click', (e)=>{
+      const within = e.target.closest('.menu-wrap');
+      if(!within) closeMenu();
+    });
+    $('downloadCsv').addEventListener('click', ()=>{ closeMenu(); exportCSV(); });
+    $('uploadCsv').addEventListener('click', ()=>{ closeMenu(); $('importFile').click(); });
+    $('clearAllMenu').addEventListener('click', ()=>{
+      closeMenu();
+      if(!confirm('Clear ALL data?')) return;
+      data = { byDate:{} }; save(); renderAll(); clearForm();
+    });
+    $('importFile').addEventListener('change', e=>{
+      const f=e.target.files[0]; if(f) importCSV(f); e.target.value='';
+    });
+
+    renderAll();
   }
 
   /* ===== CSV (Download / Upload) ===== */
@@ -502,16 +544,7 @@ function save() {
     out.push(cur); return out;
   }
 
-  /* ===== Menu wiring ===== */
-  function closeMenu(){ $('menu').classList.remove('open'); $('menuBtn').setAttribute('aria-expanded','false'); }
-  function toggleMenu(e){
-    e?.stopPropagation?.();
-    const m = $('menu'); const open = !m.classList.contains('open');
-    m.classList.toggle('open', open);
-    $('menuBtn').setAttribute('aria-expanded', String(open));
-  }
-
-  // Tabs
+  // Tabs (moved here to share with init)
   function switchTab(name){
     document.querySelectorAll('.tab').forEach(t=>{
       t.classList.toggle('active', t.getAttribute('data-tab')===name);
@@ -520,48 +553,7 @@ function save() {
     $('view-by-month').style.display = name==='by-month' ? '' : 'none';
   }
 
-  // Wire up
-  function init(){
-    load();
-    setForm(todayISO(), '', '');
-    $('monthPicker').value = todayISO().slice(0,7);
-
-    $('attempts').addEventListener('input', e=>clamp3(e.target));
-    $('made').addEventListener('input', e=>clamp3(e.target));
-
-    $('saveBtn').addEventListener('click', upsertEntry);
-    $('resetFormBtn').addEventListener('click', clearForm);
-    $('clearAllBtn').addEventListener('click', ()=>{
-      if(!confirm('Clear ALL data?')) return;
-      data = { byDate:{} }; save(); renderAll(); clearForm();
-    });
-
-    // Tabs
-    document.querySelectorAll('.tab').forEach(t=>{
-      t.addEventListener('click', ()=> switchTab(t.getAttribute('data-tab')));
-    });
-    $('monthPicker').addEventListener('change', renderMonthSection);
-
-    // Menu
-    $('menuBtn').addEventListener('click', toggleMenu);
-    document.addEventListener('click', (e)=>{
-      const within = e.target.closest('.menu-wrap');
-      if(!within) closeMenu();
-    });
-    $('downloadCsv').addEventListener('click', ()=>{ closeMenu(); exportCSV(); });
-    $('uploadCsv').addEventListener('click', ()=>{ closeMenu(); $('importFile').click(); });
-    $('clearAllMenu').addEventListener('click', ()=>{
-      closeMenu();
-      if(!confirm('Clear ALL data?')) return;
-      data = { byDate:{} }; save(); renderAll(); clearForm();
-    });
-    $('importFile').addEventListener('change', e=>{
-      const f=e.target.files[0]; if(f) importCSV(f); e.target.value='';
-    });
-
-    renderAll();
-  }
-
+  // Go!
   init();
 })();
 </script>
